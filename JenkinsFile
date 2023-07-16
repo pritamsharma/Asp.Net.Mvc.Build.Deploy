@@ -1,0 +1,376 @@
+properties(
+	[
+		parameters([
+			string(
+				defaultValue: 'Jenkins_Build_Node_Name', 
+				name: "JenkinsBuildNode",
+				trim: true
+			),
+			string(
+				defaultValue: 'Jenkins_Deploy_Node_Name', 
+				name: "JenkinsDeployNode",
+				trim: true
+			),
+			choice(
+				choices: ['QA', 'DEV', 'UAT', 'PREPROD', 'PROD'], 
+				name: "DeploymentEnvironment"
+			),
+			string(
+				defaultValue: 'https://<<domain_name>>/<<git_locaton>>.git', 
+				name: 'GitUrl', 
+				trim: true
+			),
+			string(
+				defaultValue: '*/master', 
+				name: 'BranchName', 
+				trim: true
+			),
+			string(
+				defaultValue: 'efb7ccee-888a-4b2a-831d-122ec31e17c0', 
+				name: 'GitUserCredentails', 
+				trim: true
+			),
+			string(
+				defaultValue: 'C:\\BuildLocation', 
+				name: 'BuildFolderLocation', 
+				trim: true
+			),
+			string(
+				defaultValue: '\\\\SharedFolderLocaton', 
+				name: 'SharedFolderLocation', 
+				trim: true
+			),
+			string(
+				defaultValue: 'C:\\DeploymentLocation', 
+				name: 'DeploymentFolderLocation', 
+				trim: true
+			),
+			string(
+				defaultValue: 'C:\\BackupLocation', 
+				name: 'BackupFolderLocation', 
+				trim: true
+			),
+			string(
+				defaultValue: '10', 
+				name: 'NoOfBackupToKeep', 
+				trim: true
+			),
+			string(
+				defaultValue: 'NameOfApplicationPool', 
+				name: 'AppPoolName', 
+				trim: true
+			),
+			string(
+				defaultValue: 'NameOfIISApplication', 
+				name: 'ApplicationName', 
+				trim: true
+			),
+			string(
+				defaultValue: 'Yes', 
+				name: 'ReplaceWebConfig', 
+				trim: true
+			),
+			string(
+				defaultValue: 'Yes', 
+				name: 'PutOfflinePageWhileDeploying', 
+				trim: true
+			),
+			string(
+				defaultValue: 'C:\\OfflinePage', 
+				name: 'OfflinePageHtmlLocation', 
+				trim: true
+			)
+		])
+	]
+)
+
+def solutionRootFolder = 'SolutionRootFolder' 
+def solutionName = 'SolutionName.sln'
+def solutionWebClientLocation = solutionRootFolder + '\\MvcProjectFolder\\'
+def appCmdLocation = 'C:\\Windows\\System32\\inetsrv\\'
+def tempAspNetFiles = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\Temporary ASP.NET Files\\'
+def sharedFolderName = params.SharedFolderLocation + "\\" + params.DeploymentEnvironment
+def offlineFolderLocationInProject = 'Deployment\\OfflinePage'
+
+pipeline {
+
+	agent none
+	
+	options {
+		timeout(time: 25)
+		disableConcurrentBuilds()		
+	}
+	
+	stages {
+		
+		stage('Get Latest Code'){
+			agent { label params.JenkinsBuildNode }
+			steps{
+				echo 'Checking out'
+				checkout([$class: 'GitSCM', branches: [[name: params.BranchName]], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CloneOption', timeout: 20]], gitTool: 'Default', submoduleCfg: [], userRemoteConfigs: [[credentialsId: params.GitUserCredentails, url: params.GitUrl]]])
+			}
+		}
+
+		stage('Create Working Directories In Build Node'){
+			agent { label params.JenkinsBuildNode }
+			steps{
+				script {
+					if(!fileExists(params.BuildFolderLocation)){
+						bat ("mkdir \"" + params.BuildFolderLocation + "\"")
+					}
+					
+					if(!fileExists(sharedFolderName)){
+						bat ("mkdir \"" + sharedFolderName + "\"")
+					}
+					
+					if(params.PutOfflinePageWhileDeploying == "Yes")
+					{
+						if(!fileExists(sharedFolderName + "\\OfflinePage")){
+							bat ("mkdir \"" + sharedFolderName + "\\OfflinePage" + "\"")
+						}
+
+						bat("xcopy " + offlineFolderLocationInProject + " " + sharedFolderName + "\\OfflinePage /K /H /S /E /Y")
+					}
+				}
+			}
+		}
+
+		stage('Create Working Directories In Deploy Node'){
+			agent { label params.JenkinsDeployNode }
+			steps{
+				script {
+					if(!fileExists(params.BackupFolderLocation)){
+						bat ("mkdir \"" + params.BackupFolderLocation + "\"")
+					}
+					
+					if(!fileExists(params.BackupFolderLocation + "\\Temp")){
+						bat ("mkdir \"" + params.BackupFolderLocation + "\\Temp\"")
+					}
+					
+					if(!fileExists(params.BackupFolderLocation + "\\Temp\\Config\\" + params.DeploymentEnvironment)){
+						bat ("mkdir \"" + params.BackupFolderLocation + "\\Temp\\Config\\" + params.DeploymentEnvironment + "\"")
+					}
+					
+					if(!fileExists(params.DeploymentFolderLocation)){
+						bat ("mkdir \"" + params.DeploymentFolderLocation + "\"")
+					}
+					
+					if(params.PutOfflinePageWhileDeploying == "Yes")
+					{
+						if(!fileExists(params.OfflinePageHtmlLocation)){
+							bat ("mkdir \"" + params.OfflinePageHtmlLocation + "\"")
+						}
+
+						bat("xcopy " + sharedFolderName + "\\OfflinePage " + params.OfflinePageHtmlLocation + " /K /H /S /E /Y")
+					}
+				}
+			}
+		}
+
+		stage('Backup Application'){
+			agent { label params.JenkinsDeployNode }
+			steps{
+				script{
+				
+					if(params.ReplaceWebConfig == 'Yes'){
+						echo 'Backing up web.config'
+						if(fileExists(params.DeploymentFolderLocation + "\\web.config")){
+							bat("xcopy " + params.DeploymentFolderLocation + "\\web.config " + params.BackupFolderLocation + "\\Temp /Y")
+						}
+					}
+				
+					def formattedDate = new Date().format("yyyy-MM-dd-HHmm", TimeZone.getTimeZone('UTC'))
+				
+					echo 'Backing up current deployment'
+					zip zipFile:params.BackupFolderLocation + '\\BE_Backup_' + formattedDate + '.zip', archive:false, overwrite:true, dir:params.DeploymentFolderLocation
+				}
+			}
+		}
+			
+		stage('Restore Nuget Packages') {
+			agent { label params.JenkinsBuildNode }
+			steps {
+				echo 'Restoring Nuget Packages'
+				bat ("\"${tool 'msbuild'}\" " + solutionRootFolder + "\\" + solutionName + " /t:restore")
+			}
+		}  
+
+		stage('Clean Solution') {
+			agent { label params.JenkinsBuildNode }
+			steps {
+				echo 'Cleaning solution'
+				bat ("\"${tool 'msbuild'}\" " + solutionRootFolder + "\\" + solutionName + " /t:clean /p:Configuration=Release /p:Platform=\"Any CPU\"")
+			}
+		}
+
+		stage('Build Solution') {
+			agent { label params.JenkinsBuildNode }
+			steps {
+				echo 'Build and publish started'
+				bat ("\"${tool 'msbuild'}\" " + solutionRootFolder + "\\" + solutionName + " /p:DeployOnBuild=true /p:DeployDefaultTarget=WebPublish /p:WebPublishMethod=FileSystem /p:SkipInvalidConfigurations=true /t:build /p:Configuration=Release /p:Platform=\"Any CPU\" /p:DeleteExistingFiles=True /p:publishUrl=" + params.BuildFolderLocation + "")
+			}
+		}
+
+		stage('Copy Build To Shared Location') {
+			agent { label params.JenkinsBuildNode }
+			steps {
+				script{
+					bat("xcopy " + params.BuildFolderLocation + " " + sharedFolderName + " /K /D /H /S /E /Y")
+				}
+			}
+		}
+		
+		stage('Replacing Config Values') {
+			agent { label params.JenkinsDeployNode }
+			steps {
+				script{
+					if(params.ReplaceWebConfig == 'No'){
+						echo 'Replacing web.config from previous build'
+						bat("xcopy " + params.BackupFolderLocation + "\\Temp\\web.config " + sharedFolderName + " /K /H /S /E /Y")
+					}
+				}
+			}
+		}
+
+		stage('Stop IIS Application Pool') {
+			agent { label params.JenkinsDeployNode }
+			steps {
+				echo 'Stopping Application Pool \"' + params.AppPoolName +'\"'
+				script{
+					if(params.PutOfflinePageWhileDeploying == 'Yes'){
+						bat (appCmdLocation + "appcmd.exe set vdir /vdir.name:\"Default Web Site/" + params.ApplicationName + "/\" /physicalPath:\"" + params.OfflinePageHtmlLocation + "\"" )
+					}
+					else{
+						bat (appCmdLocation + "appcmd.exe stop apppool /apppool.name:" + params.AppPoolName)
+					}
+				}
+			}
+		}
+
+		stage('Delete Previous Build') {
+			agent { label params.JenkinsDeployNode }
+			steps {
+				script{
+					if(fileExists(params.DeploymentFolderLocation)){
+						dir(params.DeploymentFolderLocation){
+							echo "Deleting directory '" + params.DeploymentFolderLocation + "'"
+							deleteDir()
+						}						
+					}
+					
+					if(fileExists(tempAspNetFiles + "\\" + params.ApplicationName)){
+						dir(tempAspNetFiles + "\\" + params.ApplicationName){
+							echo "Deleting directory '" + tempAspNetFiles + "\\" + params.ApplicationName + "'"
+							deleteDir()
+						}						
+					}
+					
+					if(!fileExists(params.DeploymentFolderLocation)){
+						bat ("mkdir \"" + params.DeploymentFolderLocation)
+					}
+				}
+			}
+		}
+	
+		stage('Deploy Build') {
+			agent { label params.JenkinsDeployNode }
+			steps {
+				echo 'Deploying Build'
+				bat("xcopy " + sharedFolderName + " " + params.DeploymentFolderLocation + " /K /H /S /E /Y")
+			}
+		}
+	
+		stage('Start IIS Application Pool') {
+			agent { label params.JenkinsDeployNode }
+			steps {
+				echo 'Starting Application Pool \"' + params.AppPoolName +'\"'
+				script{
+					if(params.PutOfflinePageWhileDeploying == 'Yes'){
+						bat (appCmdLocation + "appcmd.exe set vdir /vdir.name:\"Default Web Site/" + params.ApplicationName + "/\" /physicalPath:\"" + params.DeploymentFolderLocation + "\"" )
+					}
+					else{
+						bat (appCmdLocation + "appcmd.exe start apppool /apppool.name:" + params.AppPoolName)
+					}
+				}
+			}
+		}
+
+		stage('Delete Old Backup and Temp files from Deploy Node'){
+			agent { label params.JenkinsDeployNode }
+			steps{
+				script{
+					
+					echo 'Delete Old Backup and Temp files'
+					
+					try{
+						if(fileExists(params.BackupFolderLocation + "\\Temp")){
+							dir(params.BackupFolderLocation + "\\Temp"){
+								echo "Deleting directory '" + params.BackupFolderLocation + "\\Temp'"
+								deleteDir()
+							}						
+						}
+					}
+					catch (Exception e){
+						echo "Error occured while deleting '" + params.BackupFolderLocation + "\\Temp'"
+						echo e.toString()
+					}
+					
+					try{
+						dir(params.BackupFolderLocation){
+							def fileList = findFiles(glob: 'BE_Backup_*.zip').sort()
+							int noOfBackupToKeep = params.NoOfBackupToKeep
+							def noOfLoop = fileList.size() - noOfBackupToKeep - 1
+							for (int i = 0; i <= noOfLoop; i++) {
+								echo "Loop " + i
+								if(fileExists(params.BackupFolderLocation + "\\" + fileList[i].toString())){
+									echo "Deleting '" + params.BackupFolderLocation + "\\" + fileList[i].toString() + "'"
+									bat ("del \"" + params.BackupFolderLocation + "\\" + fileList[i].toString() + "\"")
+								}
+							}
+						}
+					}
+					catch (Exception e){
+						echo "Error occured while deleting previous backup files from location '" + params.BackupFolderLocation +"'"
+						echo e.toString()
+					}
+				}
+			}
+		}
+		
+		stage('Delete Old Backup and Temp files from Build Node'){
+			agent { label params.JenkinsBuildNode }
+			steps{
+				script{
+				
+					try{
+						if(fileExists(sharedFolderName)){
+							dir(sharedFolderName){
+								echo "Deleting directory '" + sharedFolderName + "'"
+								deleteDir()
+							}						
+						}
+					}
+					catch (Exception e){
+						echo "Error occured while deleting build folder location '" + sharedFolderName + "'"
+						echo e.toString()
+					}
+					
+					try{
+						if(fileExists(params.BuildFolderLocation)){
+							dir(params.BuildFolderLocation){
+								echo "Deleting directory '" + params.BuildFolderLocation + "'"
+								deleteDir()
+							}						
+						}
+					}
+					catch (Exception e){
+						echo "Error occured while deleting build folder location '" + params.BuildFolderLocation + "'"
+						echo e.toString()
+					}
+				
+					echo 'Cleanup Complete'
+				}
+			}
+		}
+	}
+}
